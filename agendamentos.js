@@ -1,4 +1,3 @@
-
 import { Router } from "express";
 import { FieldValue } from "firebase-admin/firestore";
 
@@ -265,12 +264,26 @@ export function registrarAgendamentos(app, { db, autenticar }) {
     });
 
     // Lista somente os agendamentos permitidos.
+
     router.get("/", async (req, res) => {
         if (!autorizado(req, res)) return;
 
         try {
+            const limite = Math.min(
+                Math.max(Number.parseInt(req.query.limite, 10) || 50, 1),
+                50
+            );
+
+            const cursor = typeof req.query.cursor === "string"
+                ? req.query.cursor
+                : null;
+
+            const data = req.query.data;
+            const status = req.query.status;
+
             let consulta = db.collection("agendamentos");
 
+            // Segurança: aplicar escopo ANTES dos filtros.
             if (req.usuario.perfil === "vendedor") {
                 consulta = consulta.where(
                     "vendedorId", "==", req.usuario.uid
@@ -281,29 +294,109 @@ export function registrarAgendamentos(app, { db, autenticar }) {
                 );
             }
 
-            const snapshot = await consulta.get();
+            // Filtros opcionais.
+            if (data) {
+                if (typeof data !== "string" ||
+                    !dataValida(data)) {
+                    return res.status(400).json({
+                        erro: "Data inválida."
+                    });
+                }
 
-            const lista = snapshot.docs.map(doc => ({
+                consulta = consulta.where("data", "==", data);
+            }
+
+            if (status) {
+                const permitidos = [
+                    "agendado",
+                    "em_atendimento",
+                    "concluido",
+                    "nao_atendeu",
+                    "reagendado"
+                ];
+
+                if (typeof status !== "string" ||
+                    !permitidos.includes(status)) {
+                    return res.status(400).json({
+                        erro: "Situação inválida."
+                    });
+                }
+
+                consulta = consulta.where("status", "==", status);
+            }
+
+            consulta = consulta.orderBy(
+                "__name__", "asc"
+            );
+
+            // Cursor referente ao último documento
+            // da página anterior.
+            if (cursor) {
+                const documento = await db
+                    .collection("agendamentos")
+                    .doc(cursor)
+                    .get();
+
+                if (!documento.exists) {
+                    return res.status(400).json({
+                        erro: "Cursor inválido."
+                    });
+                }
+
+                // Não permite utilizar cursor de outra empresa
+                // ou de outro vendedor.
+                const dados = documento.data();
+
+                if (
+                    req.usuario.perfil === "vendedor" &&
+                    dados.vendedorId !== req.usuario.uid
+                ) {
+                    return res.status(403).json({
+                        erro: "Cursor não autorizado."
+                    });
+                }
+
+                if (
+                    req.usuario.perfil !== "desbloqueio" &&
+                    dados.empresaId !== req.usuario.empresaId
+                ) {
+                    return res.status(403).json({
+                        erro: "Cursor não autorizado."
+                    });
+                }
+
+                consulta = consulta.startAfter(documento);
+            }
+
+            const snapshot = await consulta.limit(limite + 1).get();
+
+            const temMais = snapshot.docs.length > limite;
+            const documentos = snapshot.docs.slice(0, limite);
+
+            const agendamentos = documentos.map(doc => ({
                 id: doc.id,
                 ...doc.data(),
                 criadoEm: doc.data().criadoEm?.toDate()
                     ?.toISOString() ?? null
             }));
 
-            lista.sort((a, b) =>
-                `${a.data} ${a.horario}`.localeCompare(
-                    `${b.data} ${b.horario}`
-                )
-            );
+            return res.json({
+                agendamentos,
+                proximoCursor: temMais
+                    ? documentos[documentos.length - 1].id
+                    : null,
+                temMais
+            });
 
-            res.json(lista);
-        } catch (erro) {
-            console.error(erro);
-            res.status(500).json({
-                erro: "Erro ao consultar agendamentos."
+        } catch (error) {
+            console.error("Erro ao consultar agenda:", error);
+
+            return res.status(500).json({
+                erro: "Erro ao carregar agendamentos."
             });
         }
     });
 
+    // Registrar as rotas de agendamentos na API
     app.use("/api/agendamentos", router);
 }
