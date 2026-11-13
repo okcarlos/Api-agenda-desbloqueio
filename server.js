@@ -48,48 +48,78 @@ app.use("/api", rateLimit({
 }));
 
 async function autenticar(req, res, next) {
-    try {
-        const token = req.headers.authorization
-            ?.match(/^Bearer (.+)$/)?.[1];
+  try {
+    const authorization = req.headers.authorization;
 
-        if (!token) {
-            return res.status(401).json({
-                erro: "Login necessário."
-            });
-        }
-
-        const decoded = await auth.verifyIdToken(token, true);
-        const usuarioAuth = await auth.getUser(decoded.uid);
-
-        if (usuarioAuth.disabled) {
-            return res.status(403).json({
-                erro: "Conta desativada."
-            });
-        }
-
-        const perfilDoc = await db
-            .collection("usuarios")
-            .doc(decoded.uid)
-            .get();
-
-        if (!perfilDoc.exists ||
-            perfilDoc.data().ativo !== true) {
-            return res.status(403).json({
-                erro: "Usuário sem autorização."
-            });
-        }
-
-        req.usuario = {
-            uid: decoded.uid,
-            ...perfilDoc.data()
-        };
-
-        next();
-    } catch (error) {
-        return res.status(401).json({
-            erro: "Sessão inválida ou expirada."
-        });
+    if (!authorization?.startsWith("Bearer ")) {
+      return res.status(401).json({
+        erro: "Token de autenticação não enviado."
+      });
     }
+
+    const token = authorization.substring(7).trim();
+
+    if (!token) {
+      return res.status(401).json({
+        erro: "Token vazio."
+      });
+    }
+
+    // Valida o token usando o Firebase Admin SDK
+    const decoded = await auth.verifyIdToken(token, true);
+
+    // Verifica se a conta está ativa
+    const usuarioAuth = await auth.getUser(decoded.uid);
+
+    if (usuarioAuth.disabled) {
+      return res.status(403).json({
+        erro: "Conta desativada."
+      });
+    }
+
+    // Busca as permissões reais no Firestore
+    const perfilDoc = await db
+      .collection("usuarios")
+      .doc(decoded.uid)
+      .get();
+
+    if (!perfilDoc.exists) {
+      return res.status(403).json({
+        erro: "Perfil não encontrado no Firestore."
+      });
+    }
+
+    const perfil = perfilDoc.data();
+
+    if (perfil.ativo !== true) {
+      return res.status(403).json({
+        erro: "Usuário inativo."
+      });
+    }
+
+    req.usuario = {
+      uid: decoded.uid,
+      ...perfil
+    };
+
+    next();
+
+  } catch (error) {
+    console.error("ERRO DE AUTENTICAÇÃO:", {
+      codigo: error.code || "desconhecido",
+      mensagem: error.message
+    });
+
+    if (error.code?.startsWith("auth/")) {
+      return res.status(401).json({
+        erro: "Não foi possível validar a sessão Firebase."
+      });
+    }
+
+    return res.status(500).json({
+      erro: "Erro interno ao consultar a autenticação."
+    });
+  }
 }
 
 function podeGerenciar(usuario) {
